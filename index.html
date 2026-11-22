@@ -380,7 +380,7 @@ body:has(.reader-full){overflow:hidden}
             <div class="review-heading"><span class="review-icon"><i data-icon="shield"></i></span><div><h2 id="review-title">检查结果</h2><p id="review-summary" aria-live="polite"></p></div></div>
             <button class="button quiet apply-all" data-action="apply-all" id="apply-all"><i data-icon="sparkle"></i>全部改写</button>
           </header>
-          <div class="review-body" id="review-body"></div>
+          <div id="ai-review-status" role="status" style="margin-top:8px;font-size:.875rem" hidden></div><div class="review-body" id="review-body"></div>
         </aside>
       </div>
     </section>
@@ -542,8 +542,9 @@ function rewriteClauses(draft, clauses, suggestions) {
   return revised.trim() || fallbackScript;
 }
 
-function reviewDraft(draft, entries = {}) {
+function reviewDraft(draft, entries = {}, ai = []) {
   const clauses = getClauses(draft, entries);
+  const model = new Map(ai.map(item => [item.id,item]));
   const uniqueClaims = new Map();
   const issues = [];
   for (const piece of clauses) {
@@ -551,6 +552,14 @@ function reviewDraft(draft, entries = {}) {
     for (const match of piece.matches) {
       const key = match.id + ':' + normalize(match.phrase);
       if (match.material && !uniqueClaims.has(key)) uniqueClaims.set(key, { ...match, key });
+    }
+    const hit = model.get(piece.id);
+    if (hit && hit.phrase === piece.clause) {
+      const linked = pending.find(m=>m.material);
+      issues.push({id:piece.id,excerpt:piece.clause,high:hit.level==='high' || pending.some(m=>m.level==='high'),
+        suggestion:hit.suggestion,ranges:[{phrase:piece.clause,start:piece.start,end:piece.end,
+          level:hit.level,reason:hit.reason,material:linked?.material}]});
+      continue;
     }
     if (!pending.length) continue;
     const ranges = pending.map(item => ({ ...item, start: piece.start + item.start, end: piece.start + item.end }));
@@ -630,7 +639,7 @@ function fromSaved(state, checked = true) {
   return {
     id: state.id || localId(), name: state.name || '', batch: state.batch || '',
     demo: Boolean(state.demo), draft: typeof state.draft === 'string' ? state.draft : '',
-    materials: state.materials || {}, checked: state.checked ?? checked
+    ai: Array.isArray(state.ai) ? state.ai : null, materials: state.materials || {}, checked: state.checked ?? checked
   };
 }
 
@@ -673,7 +682,7 @@ function notify(message) {
 }
 
 function refreshAnalysis(preferred = selectedId) {
-  analysis = current.checked && current.draft.trim() ? reviewDraft(current.draft, current.materials) : null;
+  analysis = current.checked && current.draft.trim() ? reviewDraft(current.draft, current.materials, current.ai || []) : null;
   const issues = analysis?.issues || [];
   selectedId = issues.find(issue => issue.id === preferred)?.id ??
     issues.find(issue => issue.id > (preferred ?? -1))?.id ?? issues[0]?.id ?? null;
@@ -817,7 +826,19 @@ function issueDetail(issue, index) {
   </div>`;
 }
 
+let reviewJob = null;
+let reviewMessage = '';
 function drawReview() {
+  const status = byId('ai-review-status');
+  status.textContent = reviewMessage || (Array.isArray(current.ai) ? 'DeepSeek 审稿意见已并入检查结果。' : '');
+  status.hidden = !status.textContent;
+  if (reviewMessage && !reviewJob && current.checked) {
+    const retry = document.createElement('button');
+    retry.className = 'button quiet';
+    retry.dataset.action = 'check';
+    retry.textContent = '重新审稿';
+    status.append(' ',retry);
+  }
   const issues = analysis?.issues || [];
   const high = issues.filter(issue => issue.high).length;
   byId('apply-all').hidden = issues.length < 2;
@@ -892,6 +913,57 @@ function chooseIssue(id, source) {
   }
 }
 
+function invalidateReview() {
+  if (reviewJob) reviewJob.abort();
+  reviewJob = null;
+  reviewMessage = '';
+  current.ai = null;
+}
+async function requestReview() {
+  if (reviewJob) return;
+  const controller = new AbortController();
+  reviewJob = controller;
+  const body = JSON.stringify({draft:current.draft,product:current.name,batch:current.batch,materials:current.materials});
+  const timer = setTimeout(()=>controller.abort(),210000);
+  reviewMessage = 'DeepSeek 正在按助农直播文案规则审稿…';
+  drawReview();
+  async function send() {
+    const response = await fetch('https://farmer-livestreaming-writer.dinnrm020920.workers.dev/review',{
+      method:'POST',headers:{'Content-Type':'application/json'},body,signal:controller.signal});
+    return {response,data:await response.json()};
+  }
+  try {
+    let {response,data} = await send();
+    if (reviewJob !== controller) return;
+    if (response.status === 429 && Number.isInteger(data.retryAfter) && data.retryAfter > 0 && data.retryAfter <= 30) {
+      reviewMessage = '写稿与审稿共用30秒间隔，约' + data.retryAfter + '秒后自动提交审稿。';
+      drawReview();
+      await new Promise(resolve => setTimeout(resolve,data.retryAfter*1000+200));
+      if (reviewJob !== controller) return;
+      reviewMessage = 'DeepSeek 正在审稿…';
+      drawReview();
+      ({response,data} = await send());
+    }
+    if (!response.ok || !Array.isArray(data.issues)) throw Error(data.error || '审稿服务暂时不可用。');
+    if (reviewJob !== controller) return;
+    current.ai = data.issues;
+    reviewMessage = '';
+    refreshAnalysis();
+    recordDraft();
+    persist();
+  } catch (err) {
+    if (reviewJob !== controller) return;
+    const reason = err.name === 'AbortError' ? '审稿超时。' : err instanceof TypeError || err instanceof SyntaxError ? '无法连接审稿服务。' : err.message;
+    reviewMessage = reason + ' 当前保留已有检查结果。';
+  } finally {
+    clearTimeout(timer);
+    if (reviewJob === controller) {
+      reviewJob = null;
+      draw();
+    }
+  }
+}
+
 function checkDraft(next = 'review') {
   if (!current.draft.trim()) {
     view = 'edit';
@@ -906,6 +978,7 @@ function checkDraft(next = 'review') {
   view = next;
   draw();
   persist();
+  requestReview();
   if (next === 'read') focusReader();
   else if (selectedId !== null) focusIssue(selectedId);
   else byId('read-view').focus({ preventScroll: true });
@@ -916,7 +989,11 @@ function applySuggestion(id) {
   const nextDraft = id === undefined ? analysis.rewritten : analysis.apply(id);
   if (nextDraft === current.draft) return;
   const count = id === undefined ? analysis.issues.length : 1;
-  undoDrafts = [current.draft, ...undoDrafts].slice(0, 20);
+  undoDrafts = [{draft:current.draft,ai:current.ai}, ...undoDrafts].slice(0, 20);
+  const remaining = current.ai?.filter(hit => id !== undefined && hit.id !== id);
+  const delta = nextDraft.length - current.draft.length;
+  invalidateReview();
+  if (remaining) current.ai = remaining.map(hit=>({...hit,id:hit.id > id ? hit.id+delta : hit.id}));
   current.draft = nextDraft;
   refreshAnalysis(id);
   if (id === undefined) view = 'read';
@@ -931,7 +1008,8 @@ function applySuggestion(id) {
 
 function undo() {
   if (!undoDrafts.length) return;
-  current.draft = undoDrafts.shift();
+  invalidateReview();
+  Object.assign(current,undoDrafts.shift());
   current.checked = true;
   refreshAnalysis();
   recordDraft();
@@ -1162,6 +1240,7 @@ function exportScriptText(value, product) {
 
 function switchDraft(state) {
   recordDraft();
+  invalidateReview();
   undoDrafts = [];
   selectedId = null;
   current = fromSaved(structuredClone(state));
@@ -1246,6 +1325,7 @@ function openMaterial(typeId, issueId) {
 function alterMaterial(form, entry) {
   const typeId = form.dataset.material;
   const issueId = form.dataset.issue ? Number(form.dataset.issue) : null;
+  invalidateReview();
   if (entry) current.materials[typeId] = entry;
   else delete current.materials[typeId];
   const before = analysis?.issues.length ?? 0;
@@ -1362,6 +1442,7 @@ document.addEventListener('click', event => {
 });
 
 input.addEventListener('input', () => {
+  invalidateReview();
   if (current.demo) {
     current = fromSaved({ checked: false });
     notify('已开始你的稿件，示例材料已清空');
@@ -1407,6 +1488,7 @@ dialog.addEventListener('submit', event => {
     if (current.demo || current.name !== name || current.batch !== batch) {
       const changingPreviousBatch = !current.demo && current.name && current.batch;
       if (changingPreviousBatch) recordDraft();
+      invalidateReview();
       current = { ...current, id: changingPreviousBatch ? localId() : current.id, name, batch, demo: false, materials: {} };
       refreshAnalysis();
       recordDraft();
