@@ -830,7 +830,7 @@ let reviewJob = null;
 let reviewMessage = '';
 function drawReview() {
   const status = byId('ai-review-status');
-  status.textContent = reviewMessage || (Array.isArray(current.ai) ? 'DeepSeek 审稿意见已并入检查结果。' : '');
+  status.textContent = reviewMessage || (Array.isArray(current.ai) ? 'AI审稿意见已并入检查结果。' : '');
   status.hidden = !status.textContent;
   if (reviewMessage && !reviewJob && current.checked) {
     const retry = document.createElement('button');
@@ -925,7 +925,7 @@ async function requestReview() {
   reviewJob = controller;
   const body = JSON.stringify({draft:current.draft,product:current.name,batch:current.batch,materials:current.materials});
   const timer = setTimeout(()=>controller.abort(),210000);
-  reviewMessage = 'DeepSeek 正在按助农直播文案规则审稿…';
+  reviewMessage = 'AI正在按助农直播文案规则审稿…';
   drawReview();
   async function send() {
     const response = await fetch('https://farmer-livestreaming-writer.dinnrm020920.workers.dev/review',{
@@ -940,7 +940,7 @@ async function requestReview() {
       drawReview();
       await new Promise(resolve => setTimeout(resolve,data.retryAfter*1000+200));
       if (reviewJob !== controller) return;
-      reviewMessage = 'DeepSeek 正在审稿…';
+      reviewMessage = 'AI正在审稿…';
       drawReview();
       ({response,data} = await send());
     }
@@ -1099,7 +1099,7 @@ async function generateScript() {
   const fields = [...modalBody.querySelectorAll('.writer-grid input,.writer-grid textarea,.writer-grid select,.writer-grid button')];
   const prior = fields.map(field => field.disabled);
   fields.forEach(field => field.disabled = true);
-  status.textContent = tone === '全程讲解' ? '正在生成 30 分钟全程口播稿…' : 'DeepSeek 正在生成口播稿…';
+  status.textContent = tone === '全程讲解' ? '正在生成 30 分钟全程口播稿…' : 'AI正在生成口播稿…';
   const controller = new AbortController();
   const cancel = () => controller.abort();
   const timeout = setTimeout(cancel, tone === '全程讲解' ? 170000 : 100000);
