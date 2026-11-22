@@ -992,6 +992,7 @@ function openWriter() {
       <button class="button primary" data-action="generate-script">生成口播稿</button>
     </section>
     <section class="writer-column"><label class="form-field writer-output-label">口播稿<textarea id="writer-output" maxlength="5000" placeholder="生成的口播稿会显示在这里，可以直接修改。">${escape(w.draft)}</textarea></label>
+      <details id="writer-directions" ${w.productionNotes ? '' : 'hidden'}><summary>镜头提示与待核事项</summary><p style="white-space:pre-wrap">${escape(w.productionNotes || '')}</p></details>
       <div class="writer-actions">
         <div class="writer-transfer">
           <button class="button secondary" data-action="writer-export" ${w.draft.trim() ? '' : 'disabled'}>${icon('file')}导出 Word 文档</button>
@@ -1003,12 +1004,58 @@ function openWriter() {
 }
 
 function rememberWriting() {
-  writingSession = { product: byId('writer-product').value, notes: byId('writer-notes').value,
+  writingSession = { ...writingSession, product: byId('writer-product').value, notes: byId('writer-notes').value,
     tone: byId('writer-tone').value, draft: byId('writer-output').value };
   for (const button of modalBody.querySelectorAll('.writer-actions button')) button.disabled = !writingSession.draft.trim();
 }
 
-function generateScript() {
+async function generateScript() {
+  rememberWriting();
+  const {product, notes, tone} = writingSession;
+  const status = byId('writer-status');
+  if (!product.trim() || !notes.trim()) {
+    status.textContent = '请填写商品名称和讲解要点。';
+    byId(!product.trim() ? 'writer-product' : 'writer-notes').focus();
+    return;
+  }
+  const fields = [...modalBody.querySelectorAll('.writer-grid input,.writer-grid textarea,.writer-grid select,.writer-grid button')];
+  const prior = fields.map(field => field.disabled);
+  fields.forEach(field => field.disabled = true);
+  status.textContent = 'DeepSeek 正在生成口播稿…';
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  const timeout = setTimeout(cancel, 100000);
+  dialog.addEventListener('close',cancel,{once:true});
+  try {
+    const response = await fetch('https://farmer-livestreaming-writer.dinnrm020920.workers.dev/generate', {
+      method:'POST', headers:{'Content-Type':'application/json'}, signal:controller.signal,
+      body:JSON.stringify({product,notes,tone})
+    });
+    const result = await response.json();
+    if (!response.ok || typeof result.draft !== 'string' || !result.draft.trim()) {
+      throw new Error(result.error || '服务暂时无法生成口播稿。');
+    }
+    if (!dialog.open || status !== byId('writer-status')) return;
+    byId('writer-output').value = result.draft;
+    writingSession.productionNotes = result.notes || '';
+    const directions = byId('writer-directions');
+    directions.querySelector('p').textContent = writingSession.productionNotes;
+    directions.hidden = !writingSession.productionNotes;
+    status.textContent = '口播稿已生成，可编辑、导出或送审。';
+  } catch (error) {
+    status.textContent = error.name === 'AbortError' ? '生成已中止，可重新尝试。' :
+      (error instanceof TypeError || error instanceof SyntaxError ? '未能连接写稿服务，请稍后重试。' : error.message);
+  } finally {
+    clearTimeout(timeout);
+    dialog.removeEventListener('close',cancel);
+    if (status === byId('writer-status')) {
+      fields.forEach((field,i) => field.disabled = prior[i]);
+      rememberWriting();
+    }
+  }
+}
+
+function loadSampleOutput() {
   rememberWriting();
   const { product, notes, tone } = writingSession;
   const name = product.trim();
@@ -1260,7 +1307,10 @@ const actions = {
     byId('writer-product').value = '栖霞红富士苹果';
     byId('writer-notes').value = '果皮上能看到一道道红色条纹\n这颗样果咬起来偏脆\n每箱五斤';
     byId('writer-tone').value = '镜头展示';
-    generateScript();
+    writingSession.productionNotes = "";
+    loadSampleOutput();
+    byId("writer-directions").hidden = true;
+    byId("writer-status").textContent = "已载入苹果示例。";
   },
   'generate-script': generateScript,
   'use-script': useScript,
